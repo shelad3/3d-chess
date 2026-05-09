@@ -1,0 +1,19 @@
+# Godot exports
+export/
+exports/
+
+# Godot editor data
+.godot/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log

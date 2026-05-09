@@ -1,0 +1,11 @@
+Model Information:
+* title:	Chess Board
+* source:	https://sketchfab.com/3d-models/chess-board-739f6f5fad7b4d29b28d2ef1bfaa5118
+* author:	Andrew (https://sketchfab.com/aclajom)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Chess Board" (https://sketchfab.com/3d-models/chess-board-739f6f5fad7b4d29b28d2ef1bfaa5118) by Andrew (https://sketchfab.com/aclajom) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
