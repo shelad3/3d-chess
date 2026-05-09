@@ -17,14 +17,28 @@ var game_over := false
 var en_passant_target: Vector2i = Vector2i(-1, -1)
 var castling_rights = { PieceColor.WHITE: { "K": true, "Q": true }, PieceColor.BLACK: { "K": true, "Q": true } }
 var move_log: Array = []
+var undo_stack: Array = []
+var halfmove_clock := 0
+var last_move_from: Vector2i = Vector2i(-1, -1)
+var last_move_to: Vector2i = Vector2i(-1, -1)
+var board_flipped := false
 var ai_enabled := false
 var ai_color: PieceColor = PieceColor.BLACK
 var ai_depth := 3
 var ai_thinking := false
+var _animating := false
+var _anim_tween: Tween
+var _sfx_player: AudioStreamPlayer
+var _sfx_move: AudioStreamWAV
+var _sfx_capture: AudioStreamWAV
+var _sfx_check: AudioStreamWAV
 var captured_white: Array = []
 var captured_black: Array = []
 var promotion_pos: Vector2i
 var promotion_color: PieceColor
+var promotion_from: Vector2i
+var promotion_captured
+var promotion_flags: String = ""
 
 var board_mesh_instances: Array = []
 var piece_nodes_3d: Array = []
@@ -45,8 +59,15 @@ var camera_black_look := Vector3(0, 0.2, 0)
 var human_color: PieceColor = PieceColor.WHITE
 var move_history: Array = []
 var saved_games_dir: String
+var position_counts: Dictionary = {}
 var campaign_mode := false
 var campaign_level_id := 0
+var clock_time: float = 600.0
+var clock_white: float = 600.0
+var clock_black: float = 600.0
+var clock_running: bool = false
+var clock_label_white: Label
+var clock_label_black: Label
 var move_count := 0
 var pieces_lost := 0
 var captured_enemy_queen := false
@@ -79,6 +100,8 @@ func _ready():
 		if config.has("campaign"):
 			campaign_mode = true
 			campaign_level_id = config.campaign_level
+		if config.has("clock_time"):
+			clock_time = config.clock_time
 		Engine.remove_meta("game_config")
 
 	if should_load != "":
@@ -147,6 +170,12 @@ func setup_3d():
 	camera_node.current = true
 	camera_node.look_at(camera_white_look)
 
+	_sfx_player = AudioStreamPlayer.new()
+	add_child(_sfx_player)
+	_sfx_move = _gen_tone(440.0, 0.08, 0.4)
+	_sfx_capture = _gen_tone(220.0, 0.12, 0.6)
+	_sfx_check = _gen_tone(660.0, 0.15, 0.5)
+
 	var table_mat = StandardMaterial3D.new()
 	table_mat.albedo_color = Color("#5c3a1e")
 	table_mat.metallic = 0.1
@@ -185,6 +214,22 @@ func setup_3d():
 	status_label.size = Vector2(400, 30)
 	status_label.position = Vector2((ui_layer.size.x - 400) / 2, 10)
 	ui_layer.add_child(status_label)
+
+	clock_label_white = Label.new()
+	clock_label_white.add_theme_font_size_override("font_size", 20)
+	clock_label_white.add_theme_color_override("font_color", Color("#e0e0f0"))
+	clock_label_white.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	clock_label_white.size = Vector2(140, 30)
+	clock_label_white.position = Vector2((ui_layer.size.x - 140) / 2 - 160, 35)
+	ui_layer.add_child(clock_label_white)
+
+	clock_label_black = Label.new()
+	clock_label_black.add_theme_font_size_override("font_size", 20)
+	clock_label_black.add_theme_color_override("font_color", Color("#e0e0f0"))
+	clock_label_black.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	clock_label_black.size = Vector2(140, 30)
+	clock_label_black.position = Vector2((ui_layer.size.x - 140) / 2 + 20, 35)
+	ui_layer.add_child(clock_label_black)
 
 	move_label = Label.new()
 	move_label.add_theme_font_size_override("font_size", 14)
@@ -241,7 +286,62 @@ func setup_3d():
 	mlbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	mlbl.size = Vector2(120, 36)
 	mlbl.position = menu_btn.position
+	mlbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui_layer.add_child(mlbl)
+
+	var undo_btn = ColorRect.new()
+	undo_btn.color = Color("#16213e")
+	undo_btn.size = Vector2(90, 30)
+	undo_btn.position = Vector2(10, 675)
+	undo_btn.name = "UndoBtn"
+	ui_layer.add_child(undo_btn)
+
+	var ulbl = Label.new()
+	ulbl.text = "< Undo"
+	ulbl.add_theme_font_size_override("font_size", 14)
+	ulbl.add_theme_color_override("font_color", Color("#c0c0e0"))
+	ulbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ulbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	ulbl.size = Vector2(90, 30)
+	ulbl.position = undo_btn.position
+	ulbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui_layer.add_child(ulbl)
+
+	var flip_btn = ColorRect.new()
+	flip_btn.color = Color("#16213e")
+	flip_btn.size = Vector2(90, 30)
+	flip_btn.position = Vector2(ui_layer.size.x - 100, 675)
+	flip_btn.name = "FlipBtn"
+	ui_layer.add_child(flip_btn)
+
+	var flbl = Label.new()
+	flbl.text = "Flip ↻"
+	flbl.add_theme_font_size_override("font_size", 14)
+	flbl.add_theme_color_override("font_color", Color("#c0c0e0"))
+	flbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	flbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	flbl.size = Vector2(90, 30)
+	flbl.position = flip_btn.position
+	flbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui_layer.add_child(flbl)
+
+	var resign_btn = ColorRect.new()
+	resign_btn.color = Color("#4a1a1a")
+	resign_btn.size = Vector2(90, 30)
+	resign_btn.position = Vector2(10, 640)
+	resign_btn.name = "ResignBtn"
+	ui_layer.add_child(resign_btn)
+
+	var rslbl = Label.new()
+	rslbl.text = "Resign"
+	rslbl.add_theme_font_size_override("font_size", 14)
+	rslbl.add_theme_color_override("font_color", Color("#e0a0a0"))
+	rslbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rslbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	rslbl.size = Vector2(90, 30)
+	rslbl.position = resign_btn.position
+	rslbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui_layer.add_child(rslbl)
 
 func board_pos(col: int, row: int) -> Vector3:
 	return Vector3((col - 3.5) * SQ_SIZE, 0, (row - 3.5) * SQ_SIZE)
@@ -283,6 +383,8 @@ func draw_board_3d():
 	for y in BOARD_SIZE:
 		for x in BOARD_SIZE:
 			var is_light = (x + y) % 2 == 0
+			var sq_pos = Vector2i(x, y)
+			var is_last_move = (sq_pos == last_move_from or sq_pos == last_move_to)
 
 			var body = StaticBody3D.new()
 			body.position = board_pos(x, y) + Vector3(0, -0.04, 0)
@@ -298,7 +400,10 @@ func draw_board_3d():
 			mesh.mesh = BoxMesh.new()
 			mesh.mesh.size = Vector3(SQ_SIZE, 0.08, SQ_SIZE)
 			mesh.material_override = StandardMaterial3D.new()
-			mesh.material_override.albedo_color = Color("#f0d9b5") if is_light else Color("#b58863")
+			if is_last_move:
+				mesh.material_override.albedo_color = Color("#f6f669") if is_light else Color("#c9c93e")
+			else:
+				mesh.material_override.albedo_color = Color("#f0d9b5") if is_light else Color("#b58863")
 			body.add_child(mesh)
 
 			board_mesh_instances.append(mesh)
@@ -590,7 +695,8 @@ func draw_highlights_3d():
 func update_ui():
 	if status_label:
 		if game_over:
-			status_label.text = "Game Over"
+			if not ui_layer.get_node_or_null("GameOverOverlay"):
+				status_label.text = "Game Over"
 		elif ai_thinking:
 			status_label.text = "AI thinking..."
 		else:
@@ -620,15 +726,22 @@ func update_ui():
 		captured_label_black.text = "Captured: " + text
 
 func _set_camera_for_turn(animate: bool = true):
+	var target: Vector3
+	var look: Vector3
 	if ai_enabled:
-		var target = camera_white_pos if human_color == PieceColor.WHITE else camera_black_pos
-		var look = camera_white_look if human_color == PieceColor.WHITE else camera_black_look
-		_move_camera(target, look, animate)
-	else:
-		if turn == PieceColor.WHITE:
-			_move_camera(camera_white_pos, camera_white_look, animate)
+		if board_flipped:
+			target = camera_black_pos if human_color == PieceColor.WHITE else camera_white_pos
+			look = camera_black_look if human_color == PieceColor.WHITE else camera_white_look
 		else:
-			_move_camera(camera_black_pos, camera_black_look, animate)
+			target = camera_white_pos if human_color == PieceColor.WHITE else camera_black_pos
+			look = camera_white_look if human_color == PieceColor.WHITE else camera_black_look
+	elif board_flipped:
+		target = camera_black_pos if turn == PieceColor.WHITE else camera_white_pos
+		look = camera_black_look if turn == PieceColor.WHITE else camera_white_look
+	else:
+		target = camera_white_pos if turn == PieceColor.WHITE else camera_black_pos
+		look = camera_white_look if turn == PieceColor.WHITE else camera_black_look
+	_move_camera(target, look, animate)
 
 func _move_camera(pos: Vector3, look: Vector3, animate: bool = true):
 	if not animate:
@@ -644,14 +757,282 @@ func _move_camera(pos: Vector3, look: Vector3, animate: bool = true):
 func _camera_look_at(_val: float, look: Vector3):
 	camera_node.look_at(look)
 
+func _start_move_animation(from: Vector2i, to: Vector2i, captured, flags: String):
+	_animating = true
+	if captured != null:
+		_play_sfx(_sfx_capture)
+	else:
+		_play_sfx(_sfx_move)
+	if _anim_tween and _anim_tween.is_valid():
+		_anim_tween.kill()
+
+	_anim_tween = create_tween().set_parallel(true)
+	_anim_tween.set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_SINE)
+
+	var pnode = piece_nodes_3d[from.y][from.x]
+	if pnode and is_instance_valid(pnode):
+		var target = board_pos(to.x, to.y) + Vector3(0, 0.04, 0)
+		_anim_tween.tween_property(pnode, "position", target, 0.3)
+
+	if captured != null:
+		var cap_pos = to
+		if flags == "ep":
+			cap_pos = Vector2i(to.x, from.y)
+		var cnode = piece_nodes_3d[cap_pos.y][cap_pos.x]
+		if cnode and is_instance_valid(cnode):
+			_anim_tween.tween_property(cnode, "scale", Vector3.ZERO, 0.15)
+
+	if flags == "O-O" or flags == "O-O-O":
+		var rook_from_x = 7 if flags == "O-O" else 0
+		var rook_to_x = 5 if flags == "O-O" else 3
+		var rnode = piece_nodes_3d[from.y][rook_from_x]
+		if rnode and is_instance_valid(rnode):
+			_anim_tween.tween_property(rnode, "position", board_pos(rook_to_x, from.y) + Vector3(0, 0.04, 0), 0.3)
+
+	_anim_tween.finished.connect(_finish_after_anim)
+	_set_camera_for_turn()
+
+func _finish_after_anim():
+	_animating = false
+	render_board()
+	check_game_state()
+	if not game_over and ai_enabled and turn == ai_color:
+		make_ai_move()
+
+func _gen_tone(freq: float, duration: float, volume: float) -> AudioStreamWAV:
+	var rate = 22050
+	var n = int(rate * duration)
+	var data = PackedByteArray()
+	data.resize(n * 2)
+	var fade = 0.004
+	for i in n:
+		var t = float(i) / rate
+		var env = 1.0
+		if t < fade:
+			env = t / fade
+		elif t > duration - fade:
+			env = (duration - t) / fade
+		var s = sin(2.0 * PI * freq * t) * volume * env
+		data.encode_s16(i * 2, int(clamp(s, -1.0, 1.0) * 32767))
+	var wav = AudioStreamWAV.new()
+	wav.data = data
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = rate
+	wav.stereo = false
+	return wav
+
+func _play_sfx(sfx: AudioStreamWAV):
+	if _sfx_player and sfx:
+		_sfx_player.stream = sfx
+		_sfx_player.play()
+
+func _process(delta):
+	if clock_time <= 0: return
+	if clock_running and not game_over:
+		if turn == PieceColor.WHITE:
+			clock_white -= delta
+		else:
+			clock_black -= delta
+		_update_clock_labels()
+		if clock_white <= 0 or clock_black <= 0:
+			_on_timeout()
+
+func _on_timeout():
+	clock_running = false
+	game_over = true
+	var loser = PieceColor.WHITE if clock_white <= 0 else PieceColor.BLACK
+	var winner = opp(loser)
+	show_game_over(piece_color_str(winner) + " wins on time!", winner)
+
+func _update_clock_labels():
+	if not clock_label_white: return
+	if clock_time <= 0:
+		clock_label_white.visible = false
+		clock_label_black.visible = false
+		return
+	clock_label_white.visible = true
+	clock_label_black.visible = true
+	clock_label_white.text = _format_time(clock_white)
+	clock_label_black.text = _format_time(clock_black)
+
+func _format_time(t: float) -> String:
+	if t <= 0: return "0:00"
+	var m = int(t) / 60
+	var s = int(t) % 60
+	return str(m) + ":" + ("%02d" % s)
+
+func export_fen() -> String:
+	var rows = []
+	for y in BOARD_SIZE:
+		var row = ""
+		var empty = 0
+		for x in BOARD_SIZE:
+			var p = board[y][x]
+			if p == null:
+				empty += 1
+			else:
+				if empty > 0:
+					row += str(empty)
+					empty = 0
+				var sym = { Type.KING: "k", Type.QUEEN: "q", Type.ROOK: "r", Type.BISHOP: "b", Type.KNIGHT: "n", Type.PAWN: "p" }[p.type]
+				if p.color == PieceColor.WHITE:
+					sym = sym.to_upper()
+				row += sym
+		if empty > 0:
+			row += str(empty)
+		rows.append(row)
+	var parts = [rows.join("/")]
+	parts.append("w" if turn == PieceColor.WHITE else "b")
+	var cast = ""
+	if castling_rights[PieceColor.WHITE]["K"]: cast += "K"
+	if castling_rights[PieceColor.WHITE]["Q"]: cast += "Q"
+	if castling_rights[PieceColor.BLACK]["K"]: cast += "k"
+	if castling_rights[PieceColor.BLACK]["Q"]: cast += "q"
+	parts.append(cast if cast != "" else "-")
+	if en_passant_target != Vector2i(-1, -1):
+		var c = "abcdefgh"
+		parts.append(c[en_passant_target.x] + str(8 - en_passant_target.y))
+	else:
+		parts.append("-")
+	parts.append(str(halfmove_clock))
+	parts.append(str(move_log.size() / 2 + 1))
+	return " ".join(parts)
+
+func import_fen(fen: String) -> bool:
+	var f = fen.split(" ")
+	if f.size() < 4: return false
+	board = []
+	for y in BOARD_SIZE:
+		var row = []
+		for x in BOARD_SIZE:
+			row.append(null)
+		board.append(row)
+	var ranks = f[0].split("/")
+	if ranks.size() != 8: return false
+	for y in 8:
+		var x = 0
+		for c in ranks[y]:
+			if c >= "1" and c <= "8":
+				x += int(c)
+			else:
+				var col = PieceColor.WHITE if c == c.to_upper() else PieceColor.BLACK
+				var tp = { "k": Type.KING, "q": Type.QUEEN, "r": Type.ROOK, "b": Type.BISHOP, "n": Type.KNIGHT, "p": Type.PAWN }[c.to_lower()]
+				board[y][x] = { type = tp, color = col }
+				x += 1
+	turn = PieceColor.WHITE if f[1] == "w" else PieceColor.BLACK
+	castling_rights = { PieceColor.WHITE: { "K": false, "Q": false }, PieceColor.BLACK: { "K": false, "Q": false } }
+	if f[2] != "-":
+		if "K" in f[2]: castling_rights[PieceColor.WHITE]["K"] = true
+		if "Q" in f[2]: castling_rights[PieceColor.WHITE]["Q"] = true
+		if "k" in f[2]: castling_rights[PieceColor.BLACK]["K"] = true
+		if "q" in f[2]: castling_rights[PieceColor.BLACK]["Q"] = true
+	en_passant_target = Vector2i(-1, -1)
+	if f[3] != "-" and f[3].length() == 2:
+		var c = "abcdefgh"
+		var ex = c.find(f[3][0])
+		var ey = 8 - int(f[3][1])
+		if ex >= 0 and ey >= 0:
+			en_passant_target = Vector2i(ex, ey)
+	halfmove_clock = int(f[4]) if f.size() > 4 else 0
+	return true
+
+func export_pgn() -> String:
+	var lines = []
+	lines.append('[Event "Chess Game"]')
+	lines.append('[Site "3D Chess"]')
+	lines.append('[Date "' + Time.get_date_string_from_system() + '"]')
+	lines.append('[Round "?"]')
+	lines.append('[White "' + ("AI" if ai_enabled and ai_color == PieceColor.BLACK else "Human") + '"]')
+	lines.append('[Black "' + ("AI" if ai_enabled and ai_color == PieceColor.WHITE else "Human") + '"]')
+	lines.append('[Result "' + _pgn_result() + '"]')
+	lines.append("")
+	var moves = ""
+	for i in range(0, move_log.size(), 2):
+		var n = i / 2 + 1
+		var w = format_move(move_log[i])
+		if i + 1 < move_log.size():
+			var b = format_move(move_log[i + 1])
+			moves += str(n) + ". " + w + " " + b + " "
+		else:
+			moves += str(n) + ". " + w + " "
+	moves += _pgn_result()
+	lines.append(moves.strip_edges())
+	return "\n".join(lines)
+
+func _pgn_result() -> String:
+	if not game_over: return "*"
+	if status_label:
+		var t = status_label.text
+		if "White wins" in t: return "1-0"
+		if "Black wins" in t: return "0-1"
+	return "1/2-1/2"
+
+func _position_key() -> String:
+	var key = ""
+	for y in BOARD_SIZE:
+		for x in BOARD_SIZE:
+			var p = board[y][x]
+			if p == null: key += "."
+			else: key += str(p.type) + str(p.color)
+	key += "w" if turn == PieceColor.WHITE else "b"
+	if castling_rights[PieceColor.WHITE]["K"]: key += "K"
+	if castling_rights[PieceColor.WHITE]["Q"]: key += "Q"
+	if castling_rights[PieceColor.BLACK]["K"]: key += "k"
+	if castling_rights[PieceColor.BLACK]["Q"]: key += "q"
+	if en_passant_target != Vector2i(-1, -1):
+		var c = "abcdefgh"
+		key += c[en_passant_target.x] + str(8 - en_passant_target.y)
+	return key
+
 func format_move(entry) -> String:
 	var cols = "abcdefgh"
-	var from_str = cols[entry.from.x] + str(8 - entry.from.y)
-	var to_str = cols[entry.to.x] + str(8 - entry.to.y)
 	var pname = { Type.PAWN: "", Type.ROOK: "R", Type.KNIGHT: "N", Type.BISHOP: "B", Type.QUEEN: "Q", Type.KING: "K" }
-	var captured_str = "x" if entry.captured != null else ""
-	var flags_str = entry.get("flags", "")
-	return pname[entry.piece.type] + from_str + captured_str + to_str + flags_str
+	var flags = entry.get("flags", "")
+	var check = entry.get("check", "")
+	if flags == "O-O" or flags == "O-O-O":
+		return flags + check
+
+	var piece_char = pname[entry.piece.type]
+	var to_str = cols[entry.to.x] + str(8 - entry.to.y)
+
+	if piece_char != "":
+		var disambig = _get_disambig(entry.from, entry.to, entry.piece.type, entry.piece.color)
+		piece_char += disambig
+
+	var cap = "x" if entry.captured != null else ""
+	if piece_char == "" and cap != "":
+		piece_char = cols[entry.from.x]
+
+	var promo = ""
+	if "=" in flags:
+		var idx = flags.find("=")
+		promo = flags.substr(idx)
+
+	var ep = " e.p." if "ep" in flags else ""
+
+	return piece_char + cap + to_str + promo + ep + check
+
+func _get_disambig(from: Vector2i, to: Vector2i, ptype: int, color: int) -> String:
+	var cols = "abcdefgh"
+	var same = []
+	for y in BOARD_SIZE:
+		for x in BOARD_SIZE:
+			var p = board[y][x]
+			if p != null and p.type == ptype and p.color == color:
+				var pos = Vector2i(x, y)
+				if pos != from:
+					var raw = _get_raw_moves_from(board, pos)
+					if to in raw:
+						same.append(pos)
+	if same.is_empty(): return ""
+	var use_file = true
+	var use_rank = true
+	for s in same:
+		if s.x != from.x: use_file = false
+		if s.y != from.y: use_rank = false
+	if not use_file and use_rank: return cols[from.x]
+	if use_file and not use_rank: return str(8 - from.y)
+	return cols[from.x] + str(8 - from.y)
 
 func piece_color_str(c: PieceColor) -> String:
 	return "White" if c == PieceColor.WHITE else "Black"
@@ -690,6 +1071,9 @@ func _setup_board():
 
 func setup_board():
 	_setup_board()
+	clock_white = clock_time
+	clock_black = clock_time
+	clock_running = true
 
 func get_raw_moves(pos: Vector2i) -> Array:
 	return _get_raw_moves_from(board, pos)
@@ -715,7 +1099,7 @@ func _get_raw_moves_from(bd: Array, pos: Vector2i) -> Array:
 				var d = Vector2i(pos.x + dx, pos.y + dir)
 				if is_in_bounds(d) and bd[d.y][d.x] != null and bd[d.y][d.x].color != c:
 					moves.append(d)
-				if d == en_passant_target:
+				if d == en_passant_target and ((c == PieceColor.WHITE and pos.y == 3) or (c == PieceColor.BLACK and pos.y == 4)):
 					moves.append(d)
 		Type.ROOK:
 			for dd in [Vector2i(0,1),Vector2i(0,-1),Vector2i(1,0),Vector2i(-1,0)]:
@@ -873,6 +1257,30 @@ func _input(event):
 			if "quicksave" in saves:
 				load_game("quicksave")
 			return
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F and event.ctrl_pressed and not event.shift_pressed:
+			var fen = export_fen()
+			DisplayServer.clipboard_set(fen)
+			show_message("FEN copied to clipboard")
+			return
+		if event.keycode == KEY_F and event.ctrl_pressed and event.shift_pressed:
+			var fen = DisplayServer.clipboard_get()
+			if fen != "" and import_fen(fen):
+				selected = Vector2i(-1, -1)
+				valid_moves = []
+				render_board()
+				_set_camera_for_turn(false)
+				show_message("FEN imported")
+			else:
+				show_message("Invalid FEN")
+			return
+		if event.keycode == KEY_P and event.ctrl_pressed and not event.shift_pressed:
+			var pgn = export_pgn()
+			DisplayServer.clipboard_set(pgn)
+			show_message("PGN copied to clipboard")
+			return
+	if _animating:
+		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		if game_over or ai_thinking:
 			return
@@ -889,6 +1297,19 @@ func _handle_ui_click(gp: Vector2) -> bool:
 	var menu = ui_layer.get_node_or_null("MenuBtn")
 	if menu and Rect2(menu.position, menu.size).has_point(gp):
 		get_tree().change_scene_to_file("res://menu.tscn")
+		return true
+	var undo = ui_layer.get_node_or_null("UndoBtn")
+	if undo and Rect2(undo.position, undo.size).has_point(gp):
+		undo_move()
+		return true
+	var resign = ui_layer.get_node_or_null("ResignBtn")
+	if resign and Rect2(resign.position, resign.size).has_point(gp) and not game_over:
+		resign_game()
+		return true
+	var flip = ui_layer.get_node_or_null("FlipBtn")
+	if flip and Rect2(flip.position, flip.size).has_point(gp):
+		board_flipped = not board_flipped
+		_set_camera_for_turn()
 		return true
 	if promotion_panel and promotion_panel.visible:
 		return _handle_promotion_click(gp)
@@ -930,10 +1351,7 @@ func _handle_board_click(gp: Vector2):
 			execute_move(selected, br)
 			selected = Vector2i(-1, -1)
 			valid_moves = []
-			render_board()
 			check_game_state()
-			if not game_over and ai_enabled and turn == ai_color:
-				make_ai_move()
 		else:
 			var p = board[br.y][br.x]
 			if p != null and p.color == turn:
@@ -951,7 +1369,17 @@ func execute_move(from: Vector2i, to: Vector2i):
 	var captured = board[to.y][to.x]
 	var flags := ""
 
-	if p.type == Type.PAWN and to == en_passant_target:
+	var snapshot = {
+		board = _clone_board(),
+		turn = turn,
+		en_passant = en_passant_target,
+		castling = { PieceColor.WHITE: castling_rights[PieceColor.WHITE].duplicate(), PieceColor.BLACK: castling_rights[PieceColor.BLACK].duplicate() },
+		halfmove = halfmove_clock,
+		captured_w = captured_white.duplicate(),
+		captured_b = captured_black.duplicate(),
+	}
+
+	if p.type == Type.PAWN and to == en_passant_target and ((p.color == PieceColor.WHITE and from.y == 3) or (p.color == PieceColor.BLACK and from.y == 4)):
 		var ep = Vector2i(to.x, from.y)
 		captured = board[ep.y][ep.x]
 		board[ep.y][ep.x] = null
@@ -978,6 +1406,12 @@ func execute_move(from: Vector2i, to: Vector2i):
 		var row = 7 if p.color == PieceColor.WHITE else 0
 		if from == Vector2i(7, row): castling_rights[p.color]["K"] = false
 		if from == Vector2i(0, row): castling_rights[p.color]["Q"] = false
+	for y in BOARD_SIZE:
+		for x in BOARD_SIZE:
+			var rp = board[y][x]
+			if rp != null and rp.type == Type.ROOK and rp.color == p.color and (y == 0 or y == 7):
+				if x == 7: castling_rights[rp.color]["K"] = false
+				if x == 0: castling_rights[rp.color]["Q"] = false
 
 	if captured != null:
 		if captured.color == PieceColor.WHITE:
@@ -988,17 +1422,39 @@ func execute_move(from: Vector2i, to: Vector2i):
 	board[to.y][to.x] = p
 	board[from.y][from.x] = null
 
+	if p.type == Type.PAWN or captured != null:
+		halfmove_clock = 0
+	else:
+		halfmove_clock += 1
+
+	last_move_from = from
+	last_move_to = to
+
 	if p.type == Type.PAWN and (to.y == 0 or to.y == 7):
-		promote_pawn(to, p.color)
+		undo_stack.append(snapshot)
+		if undo_stack.size() > 128:
+			undo_stack.pop_front()
+		promotion_from = from
+		promotion_captured = captured
+		promote_pawn(to, p.color, flags)
 		return
 
-	move_log.append({ from = from, to = to, piece = p, captured = captured, flags = flags })
-	_update_campaign_stats()
-	turn = opp(turn)
-	_set_camera_for_turn()
-	render_board()
+	undo_stack.append(snapshot)
+	if undo_stack.size() > 128:
+		undo_stack.pop_front()
 
-func promote_pawn(pos: Vector2i, color: PieceColor):
+	var check_sym = ""
+	turn = opp(turn)
+	if is_in_check(turn):
+		check_sym = "#" if not has_legal_moves(turn) else "+"
+	var pos_key = _position_key()
+	position_counts[pos_key] = position_counts.get(pos_key, 0) + 1
+	move_log.append({ from = from, to = to, piece = p, captured = captured, flags = flags, check = check_sym, pos_key = pos_key })
+	_update_campaign_stats()
+	_start_move_animation(from, to, captured, flags)
+
+func promote_pawn(pos: Vector2i, color: PieceColor, flags: String = ""):
+	promotion_flags = flags
 	show_promotion_dialog(pos, color)
 
 func show_promotion_dialog(pos: Vector2i, color: PieceColor):
@@ -1053,24 +1509,125 @@ func _handle_promotion_click(gp: Vector2) -> bool:
 func _execute_promotion(ptype: Type):
 	var p = board[promotion_pos.y][promotion_pos.x]
 	if p == null: return
-	var captured = null
+	var promo_type_names = { Type.QUEEN: "Q", Type.ROOK: "R", Type.BISHOP: "B", Type.KNIGHT: "N" }
+	var promo_flag = "=" + promo_type_names.get(ptype, "Q")
+	var combined_flags = promotion_flags
+	if combined_flags != "" and combined_flags != "ep":
+		combined_flags += promo_flag
+	else:
+		combined_flags = promo_flag
+
 	board[promotion_pos.y][promotion_pos.x] = { type = ptype, color = promotion_color }
-	move_log.append({ from = promotion_pos, to = promotion_pos, piece = board[promotion_pos.y][promotion_pos.x], captured = captured, flags = "=Q" })
 
 	promotion_panel.queue_free()
 	promotion_panel = null
 	promo_buttons = []
 
+	_update_campaign_stats()
 	turn = opp(turn)
-	_set_camera_for_turn()
+	var check_sym = ""
+	if is_in_check(turn):
+		check_sym = "#" if not has_legal_moves(turn) else "+"
+	var pos_key = _position_key()
+	position_counts[pos_key] = position_counts.get(pos_key, 0) + 1
+	move_log.append({ from = promotion_from, to = promotion_pos, piece = { type = ptype, color = promotion_color }, captured = promotion_captured, flags = combined_flags, check = check_sym, pos_key = pos_key })
+	_start_move_animation(promotion_from, promotion_pos, promotion_captured, combined_flags)
+
+func _clone_board() -> Array:
+	var copy = []
+	for y in BOARD_SIZE:
+		var row = []
+		for x in BOARD_SIZE:
+			var p = board[y][x]
+			if p != null:
+				row.append({ type = p.type, color = p.color })
+			else:
+				row.append(null)
+		copy.append(row)
+	return copy
+
+func _restore_board(data: Array):
+	for y in BOARD_SIZE:
+		for x in BOARD_SIZE:
+			board[y][x] = data[y][x]
+
+func undo_move():
+	if undo_stack.is_empty(): return
+	if ai_enabled: return
+	if _animating: return
+
+	game_over = false
+	var overlay = ui_layer.get_node_or_null("GameOverOverlay")
+	if overlay:
+		overlay.queue_free()
+
+	var snap = undo_stack.pop_back()
+	_restore_board(snap.board)
+	turn = snap.turn
+	en_passant_target = snap.en_passant
+	castling_rights = snap.castling
+	halfmove_clock = snap.halfmove
+	captured_white = snap.captured_w.duplicate()
+	captured_black = snap.captured_b.duplicate()
+	last_move_from = Vector2i(-1, -1)
+	last_move_to = Vector2i(-1, -1)
+	selected = Vector2i(-1, -1)
+	valid_moves = []
+
+	move_log.pop_back()
+	if move_log.size() > 0:
+		var prev = move_log.back()
+		last_move_from = prev.from
+		last_move_to = prev.to
+	position_counts = {}
+	for entry in move_log:
+		var k = entry.get("pos_key", "")
+		if k != "":
+			position_counts[k] = position_counts.get(k, 0) + 1
+
 	render_board()
-	check_game_state()
-	if not game_over and ai_enabled and turn == ai_color:
+	_set_camera_for_turn()
+	if ai_enabled and turn == ai_color:
 		make_ai_move()
 
+func _check_draw_conditions():
+	if game_over: return
+
+	if halfmove_clock >= 50:
+		game_over = true
+		show_game_over("Draw by 50-move rule!")
+		return
+
+	if _is_insufficient_material():
+		game_over = true
+		show_game_over("Draw by insufficient material!")
+		return
+
+	var pk = _position_key()
+	if position_counts.get(pk, 0) >= 3:
+		game_over = true
+		show_game_over("Draw by threefold repetition!")
+		return
+
+func _is_insufficient_material() -> bool:
+	var pieces = []
+	for y in BOARD_SIZE:
+		for x in BOARD_SIZE:
+			var p = board[y][x]
+			if p != null and p.type != Type.KING:
+				pieces.append(p)
+	if pieces.is_empty(): return true
+	if pieces.size() == 1 and pieces[0].type == Type.BISHOP: return true
+	if pieces.size() == 1 and pieces[0].type == Type.KNIGHT: return true
+	return false
+
 func check_game_state():
+	if game_over: return
+	_check_draw_conditions()
+	if game_over: return
 	var c = turn
 	if is_in_check(c):
+		_play_sfx(_sfx_check)
 		if not has_legal_moves(c):
 			game_over = true
 			var winner_color = opp(c)
@@ -1149,7 +1706,18 @@ func _on_overlay_click(event):
 		else:
 			restart_game()
 
+func resign_game():
+	if game_over: return
+	if ai_enabled or campaign_mode: return
+	game_over = true
+	clock_running = false
+	var winner = opp(turn)
+	show_game_over(piece_color_str(winner) + " wins by resignation!", winner)
+
 func restart_game():
+	_animating = false
+	if _anim_tween and _anim_tween.is_valid():
+		_anim_tween.kill()
 	var overlay = ui_layer.get_node_or_null("GameOverOverlay")
 	if overlay: overlay.queue_free()
 	if promotion_panel:
@@ -1166,6 +1734,14 @@ func restart_game():
 	move_log = []
 	captured_white = []
 	captured_black = []
+	undo_stack = []
+	halfmove_clock = 0
+	last_move_from = Vector2i(-1, -1)
+	last_move_to = Vector2i(-1, -1)
+	board_flipped = false
+	clock_white = clock_time
+	clock_black = clock_time
+	clock_running = true
 	_setup_board()
 	render_board()
 	if ai_enabled and turn == ai_color:
@@ -1210,6 +1786,9 @@ func save_game(slot: String):
 		"ai": ai_enabled,
 		"ai_depth": ai_depth,
 		"human_color": human_color,
+		"clock_white": clock_white,
+		"clock_black": clock_black,
+		"clock_time": clock_time,
 	}
 	var path = saved_games_dir.path_join(slot + ".save")
 	var file = FileAccess.open(path, FileAccess.WRITE)
@@ -1253,6 +1832,10 @@ func load_game(slot: String):
 	ai_enabled = data.ai
 	ai_depth = data.ai_depth
 	human_color = data.human_color
+	clock_white = data.get("clock_white", clock_time)
+	clock_black = data.get("clock_black", clock_time)
+	clock_time = data.get("clock_time", 600.0)
+	clock_running = true
 	selected = Vector2i(-1, -1)
 	valid_moves = []
 	game_over = false
@@ -1303,10 +1886,6 @@ func make_ai_move():
 
 	if best.from != Vector2i(-1, -1):
 		execute_move(best.from, best.to)
-		render_board()
-		check_game_state()
-		if not game_over and ai_enabled and turn == ai_color:
-			make_ai_move()
 
 func _notification(what):
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:

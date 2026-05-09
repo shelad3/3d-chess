@@ -172,7 +172,7 @@ func show_new_game():
 	var cx = get_viewport_rect().size.x / 2.0
 	var cy = get_viewport_rect().size.y / 2.0
 	var pw = 360.0
-	var ph = 380.0
+	var ph = 440.0
 	make_panel(cx - pw / 2, cy - ph / 2 - 20, pw, ph)
 
 	var title = Label.new()
@@ -184,6 +184,43 @@ func show_new_game():
 	title.position = Vector2(cx - pw / 2, cy - ph / 2 + 15)
 	title.name = "PanelTitle"
 	add_child(title)
+
+	var tlbl = Label.new()
+	tlbl.text = "Time per player"
+	tlbl.add_theme_font_size_override("font_size", 14)
+	tlbl.add_theme_color_override("font_color", Color("#a0a0c0"))
+	tlbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tlbl.size = Vector2(pw - 40, 24)
+	tlbl.position = Vector2(cx - pw / 2 + 20, cy - ph / 2 + 55)
+	add_child(tlbl)
+
+	var time_slider = HSlider.new()
+	time_slider.size = Vector2(240, 30)
+	time_slider.position = Vector2(cx - 120, cy - ph / 2 + 80)
+	time_slider.min_value = 0
+	time_slider.max_value = 5
+	time_slider.value = 2
+	time_slider.step = 1
+	time_slider.name = "TimeSlider"
+	time_slider.tick_count = 6
+	add_child(time_slider)
+
+	var tval = Label.new()
+	tval.name = "TimeVal"
+	tval.add_theme_font_size_override("font_size", 14)
+	tval.add_theme_color_override("font_color", Color("#e0d8c8"))
+	tval.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tval.size = Vector2(100, 24)
+	tval.position = Vector2(cx - 50, cy - ph / 2 + 105)
+	add_child(tval)
+
+	var time_labels = ["No limit", "3 min", "5 min", "10 min", "15 min", "30 min"]
+	var time_values = [0, 180, 300, 600, 900, 1800]
+
+	time_slider.value_changed.connect(func(val):
+		tval.text = time_labels[val])
+
+	tval.text = time_labels[int(time_slider.value)]
 
 	var options = [
 		{ text = "Human vs Human", ai = false, depth = 0 },
@@ -199,6 +236,9 @@ func show_new_game():
 		var depth_val = opt.depth
 		btn.connect("gui_input", func(event):
 			if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+				var ts = get_node_or_null("TimeSlider")
+				var ct = time_values[int(ts.value)] if ts else 600
+				Engine.set_meta("pending_clock_time", ct)
 				start_game(ai_val, depth_val))
 
 	var back_btn = make_btn(cx - 80, cy + 140, 160, 40, "Back", 99)
@@ -676,5 +716,9 @@ func start_game(ai: bool, depth: int):
 	if ai and Engine.has_meta("settings_ai_depth"):
 		var sd = Engine.get_meta("settings_ai_depth")
 		ad = int(sd.value)
-	Engine.set_meta("game_config", { ai = ai, depth = ad })
+	var ct = 600
+	if Engine.has_meta("pending_clock_time"):
+		ct = Engine.get_meta("pending_clock_time")
+		Engine.remove_meta("pending_clock_time")
+	Engine.set_meta("game_config", { ai = ai, depth = ad, clock_time = ct })
 	get_tree().change_scene_to_file("res://game.tscn")
